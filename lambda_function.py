@@ -25,7 +25,7 @@ def lambda_handler(event, context):
     url = f"{BASE_URL}{SEARCH_PATH.format(page='1')}"
     print("Search URL:", url)
 
-    os.getenv('MONGO_URI') 
+    MONGO_URI = os.getenv('MONGO_URI') 
     if not MONGO_URI:
         print("ERROR: MONGO_URI not set")
         return {
