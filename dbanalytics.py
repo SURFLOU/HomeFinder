@@ -1,107 +1,61 @@
-from datetime import datetime, timedelta
 from pymongo import MongoClient
 from typing import List, Dict
-import logging
+from datetime import datetime
 
-logger = logging.getLogger(__name__)
 
 class DBAnalytics:
     def __init__(self, client: MongoClient):
         self.client = client
         self.db = self.client["flatsdb"]
         self.collection = self.db["listings"]
-        logger.debug("DBAnalytics initialized for database 'flatsdb'.")
 
-    def count_active_offers(self) -> int:
-        return self.collection.count_documents({
-            "is_current": True
-        })
-
-    def price_changes_today(self) -> List[Dict]:
-        start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + timedelta(days=1)
-
-        pipeline = [
-            {
-                "$match": {
-                    "is_current": True,
-                    "valid_from": {
-                        "$gte": start,
-                        "$lt": end
-                    }
-                }
-            },
-            {
-                "$lookup": {
-                    "from": "listings",
-                    "let": {"url": "$url", "from": "$valid_from"},
-                    "pipeline": [
-                        {
-                            "$match": {
-                                "$expr": {
-                                    "$and": [
-                                        {"$eq": ["$url", "$$url"]},
-                                        {"$lt": ["$valid_from", "$$from"]}
-                                    ]
-                                }
-                            }
-                        },
-                        {"$sort": {"valid_from": -1}},
-                        {"$limit": 1}
-                    ],
-                    "as": "previous"
-                }
-            },
-            {
-                "$unwind": "$previous"
-            },
-            {
-                "$match": {
-                    "$expr": {
-                        "$ne": ["$main_price", "$previous.main_price"]
-                    }
-                }
-            },
-            {
-                "$project": {
-                    "_id": 0,
-                    "url": 1,
-                    "old_price": "$previous.main_price",
-                    "new_price": "$main_price",
-                    "price_diff": {
-                        "$subtract": ["$main_price", "$previous.main_price"]
-                    },
-                    "effective_from": "$valid_from",
-                    "district": 1,
-                    "subdistrict": 1,
-                    "area_m2": 1
-                }
-            }
-        ]
-
-        return list(self.collection.aggregate(pipeline))
-    
-    def count_active_offers(self) -> int:
-        return self.collection.count_documents({"is_current": True})
-
-    def get_new_unannounced_flats(self) -> List[Dict]:
+    def get_current_unannounced(self) -> List[Dict]:
         return list(self.collection.find({
             "is_current": True,
             "is_announced": False
         }))
 
-    def mark_as_announced(self, url: str):
+    def mark_announced(self, _id):
         self.collection.update_one(
-            {"url": url, "is_current": True},
+            {"_id": _id},
             {"$set": {"is_announced": True}}
         )
 
+    def get_previous_price(self, url: str):
+        prev = self.collection.find_one(
+            {
+                "url": url,
+                "is_current": False,
+                "main_price": {"$ne": None}
+            },
+            sort=[("valid_from", -1)]
+        )
+        return prev["main_price"] if prev else None
+
+    def process_announcements(self, send_new, send_price_change):
+        current = self.get_current_unannounced()
+
+        by_url = {}
+        for doc in current:
+            by_url.setdefault(doc["url"], []).append(doc)
+
+        for url, docs in by_url.items():
+            doc = docs[0]
+
+            if doc.get("is_price_change"):
+                send_price_change(doc)
+                self.mark_announced(doc["_id"])
+                continue
+
+            send_new(doc)
+            self.mark_announced(doc["_id"])
+
+    def count_active_offers(self) -> int:
+        return self.collection.count_documents({"is_current": True})
+
     def get_top_active(self, n: int) -> List[Dict]:
         return list(
-            self.collection.find(
-                {"is_current": True},
-                {"_id": 0}
-            )
-            .sort("main_price", 1)  
+            self.collection.find({"is_current": True})
+            .sort("price_per_m2", 1)
             .limit(n)
         )

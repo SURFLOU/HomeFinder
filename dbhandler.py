@@ -1,11 +1,9 @@
 from datetime import datetime
 from pymongo import MongoClient
-from typing import Dict
-import copy
-from pydantic import BaseModel, Field, HttpUrl
-from typing import Optional
-from datetime import datetime
+from typing import Dict, Optional
+from pydantic import BaseModel, Field
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -22,11 +20,14 @@ class ListingBase(BaseModel):
     area_m2: Optional[float]
     floor_number: Optional[int]
 
+
 class ListingSCD2(ListingBase):
     valid_from: datetime
     valid_to: Optional[datetime] = None
     is_current: bool = True
     is_announced: bool = Field(default=False)
+    is_price_change: bool = Field(default=False)  
+
 
 class DBHandler:
     def __init__(self, client: MongoClient):
@@ -41,9 +42,29 @@ class DBHandler:
         )
         logger.info("Ensured unique partial index on (url, is_current)")
 
+    def normalize_url(self, url: str) -> str:
+        """
+        Normalize Otodom URLs so:
+        - /hpr/pl/oferta/... -> /pl/oferta/...
+        - remove query params
+        """
+        if not url:
+            return url
+
+        url = re.sub(r"/hpr/", "/", url)
+        url = url.split("?")[0]
+        return url.rstrip("/")
+
     def _business_fields(self, doc: Dict) -> Dict:
-        """Remove SCD metadata before comparison"""
-        ignore = {"_id", "valid_from", "valid_to", "is_current", "is_announced"}
+        """Remove SCD & announcement metadata before comparison"""
+        ignore = {
+            "_id",
+            "valid_from",
+            "valid_to",
+            "is_current",
+            "is_announced",
+            "is_price_change",
+        }
         return {k: v for k, v in doc.items() if k not in ignore}
 
     def upsert_scd2(self, raw_listing: Dict, initial_append: bool = False) -> bool:
@@ -54,6 +75,10 @@ class DBHandler:
         """
 
         now = datetime.utcnow()
+
+        raw_listing = raw_listing.copy()
+        raw_listing["url"] = self.normalize_url(raw_listing["url"])
+
         listing_base = ListingBase(**raw_listing)
 
         current = self.collection.find_one({
@@ -66,32 +91,31 @@ class DBHandler:
                 **listing_base.dict(),
                 valid_from=now,
                 is_current=True,
-                is_announced=initial_append
+                is_announced=initial_append,
+                is_price_change=False
             ).dict()
 
             self.collection.insert_one(new_doc)
             return True
+
 
         if self._business_fields(current) == self._business_fields(raw_listing):
             return False
 
         price_changed = current.get("main_price") != listing_base.main_price
 
-        is_announced = (
-            False if price_changed else True
-        )
-
         self.collection.update_one(
             {"_id": current["_id"]},
             {"$set": {"valid_to": now, "is_current": False}}
         )
-        
+
         new_doc = ListingSCD2(
             **listing_base.dict(),
             valid_from=now,
             valid_to=None,
             is_current=True,
-            is_announced=is_announced
+            is_announced=False,          
+            is_price_change=price_changed
         ).dict()
 
         self.collection.insert_one(new_doc)
