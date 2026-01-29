@@ -92,7 +92,6 @@ class DBHandler:
             return True
 
         same_business = self._business_fields(current) == self._business_fields(raw_listing)
-
         if same_business:
             return False
 
@@ -101,6 +100,14 @@ class DBHandler:
 
         prev_ppm2 = current.get("price_per_m2")
         curr_ppm2 = listing_base.price_per_m2
+
+        value_to_null = (
+            (prev_price is not None and curr_price is None) or
+            (prev_ppm2 is not None and curr_ppm2 is None)
+        )
+
+        if value_to_null:
+            return False
 
         is_null_to_value = (
             prev_price == curr_price and
