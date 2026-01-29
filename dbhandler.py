@@ -68,12 +68,6 @@ class DBHandler:
         return {k: v for k, v in doc.items() if k not in ignore}
 
     def upsert_scd2(self, raw_listing: Dict, initial_append: bool = False) -> bool:
-        """
-        Returns:
-            True  -> new SCD row inserted
-            False -> skipped (no change)
-        """
-
         now = datetime.utcnow()
 
         raw_listing = raw_listing.copy()
@@ -94,15 +88,31 @@ class DBHandler:
                 is_announced=initial_append,
                 is_price_change=False
             ).dict()
-
             self.collection.insert_one(new_doc)
             return True
 
+        same_business = self._business_fields(current) == self._business_fields(raw_listing)
 
-        if self._business_fields(current) == self._business_fields(raw_listing):
+        if same_business:
             return False
 
-        price_changed = current.get("main_price") != listing_base.main_price
+        prev_price = current.get("main_price")
+        curr_price = listing_base.main_price
+
+        prev_ppm2 = current.get("price_per_m2")
+        curr_ppm2 = listing_base.price_per_m2
+
+        is_null_to_value = (
+            prev_price == curr_price and
+            prev_ppm2 is None and
+            curr_ppm2 is not None
+        )
+
+        is_real_price_change = (
+            prev_price is not None and
+            curr_price is not None and
+            prev_price != curr_price
+        )
 
         self.collection.update_one(
             {"_id": current["_id"]},
@@ -112,10 +122,9 @@ class DBHandler:
         new_doc = ListingSCD2(
             **listing_base.dict(),
             valid_from=now,
-            valid_to=None,
             is_current=True,
-            is_announced=False,          
-            is_price_change=price_changed
+            is_announced=is_null_to_value,
+            is_price_change=is_real_price_change
         ).dict()
 
         self.collection.insert_one(new_doc)
